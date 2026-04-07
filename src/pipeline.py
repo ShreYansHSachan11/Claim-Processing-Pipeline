@@ -80,7 +80,7 @@ def run_pipeline(
     """Run the claim processing pipeline and return the aggregated ClaimResult."""
     if llm is None:
         from langchain_google_genai import ChatGoogleGenerativeAI
-        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0)
+        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=0)
 
     compiled = build_graph(llm)
 

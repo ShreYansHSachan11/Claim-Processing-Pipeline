@@ -36,7 +36,7 @@ def extract_pdf_pages(data: bytes) -> list[str]:
     pages = []
     for page in doc:
         # Render at 150 DPI — good balance of quality vs token cost
-        mat = fitz.Matrix(100 / 72, 100 / 72)
+        mat = fitz.Matrix(72 / 72, 72 / 72)
         pix = page.get_pixmap(matrix=mat)
         img_bytes = pix.tobytes("png")
         b64 = base64.b64encode(img_bytes).decode("utf-8")
