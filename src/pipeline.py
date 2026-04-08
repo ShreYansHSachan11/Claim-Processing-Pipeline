@@ -79,9 +79,9 @@ def run_pipeline(
 ) -> ClaimResult:
     """Run the claim processing pipeline and return the aggregated ClaimResult."""
     if llm is None:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash-lite", temperature=0)
-
+        from langchain_groq import ChatGroq
+        llm = ChatGroq(model="meta-llama/llama-4-scout-17b-16e-instruct", temperature=0)
+        
     compiled = build_graph(llm)
 
     initial_state: PipelineState = {
