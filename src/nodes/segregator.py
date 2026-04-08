@@ -1,8 +1,10 @@
 """Segregator node — classifies PDF pages using vision LLM in batches of 5."""
 
+import json
+import re
 from pydantic import BaseModel
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, AIMessage
 
 from src.state import PipelineState
 from src.models import DocumentType
@@ -16,25 +18,41 @@ DOCUMENT_TYPES = [
 MAX_IMAGES_PER_CALL = 5
 
 
-class PageClassification(BaseModel):
-    document_type: DocumentType
+def _extract_json_from_text(text: str) -> list | None:
+    """Try to extract a JSON array from any text."""
+    # Try direct parse first
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict) and "classifications" in parsed:
+            return parsed["classifications"]
+    except Exception:
+        pass
 
+    # Find JSON array in text
+    match = re.search(r'\[\s*\{[\s\S]*?\}\s*\]', text)
+    if match:
+        try:
+            parsed = json.loads(match.group())
+            if isinstance(parsed, list):
+                return parsed
+        except Exception:
+            pass
 
-class AllPagesClassification(BaseModel):
-    classifications: list[PageClassification]
+    return None
 
 
 def _classify_batch(llm: BaseChatModel, b64_images: list[str], start_idx: int) -> list[tuple[int, str]]:
-    """Classify a batch of pages (max 5) in a single LLM call."""
+    """Classify a batch of pages in a single LLM call, with robust JSON parsing."""
     n = len(b64_images)
     prompt = (
         f"You are a document classifier for insurance claims. "
-        f"I am sending you {n} page image(s) (pages {start_idx} to {start_idx + n - 1}). "
-        f"Classify EACH page into exactly one of these document types: "
+        f"Classify each of the {n} page image(s) I'm sending into exactly one of: "
         + ", ".join(DOCUMENT_TYPES)
-        + f". Return a JSON object with a 'classifications' key containing an array of exactly {n} objects "
-        f"in order, each with a 'document_type' field. "
-        f'Example: {{"classifications": [{{"document_type": "claim_form"}}]}}'
+        + f". Respond with ONLY a JSON array of {n} objects like: "
+        + '[{"document_type": "claim_form"}, {"document_type": "other"}]'
+        + ". No explanation, just the JSON array."
     )
 
     content = []
@@ -45,39 +63,37 @@ def _classify_batch(llm: BaseChatModel, b64_images: list[str], start_idx: int) -
         })
     content.append({"type": "text", "text": prompt})
 
-    def _parse_results(classifications: list) -> list[tuple[int, str]]:
-        while len(classifications) < n:
-            classifications.append({"document_type": "other"})
+    def _parse_results(raw: list) -> list[tuple[int, str]]:
+        while len(raw) < n:
+            raw.append({"document_type": "other"})
         results = []
-        for i, cls in enumerate(classifications[:n]):
-            if isinstance(cls, dict):
-                doc_type = cls.get("document_type", "other")
+        for i, item in enumerate(raw[:n]):
+            if isinstance(item, dict):
+                doc_type = item.get("document_type", "other")
             else:
-                doc_type = getattr(cls, "document_type", "other")
+                doc_type = str(item)
             if doc_type not in DOCUMENT_TYPES:
                 doc_type = "other"
             results.append((start_idx + i, doc_type))
         return results
 
-    # Try structured output first
+    # Use plain invoke (no structured output) to avoid Groq tool_use_failed errors
     try:
-        structured_llm = llm.with_structured_output(AllPagesClassification)
-        result: AllPagesClassification = structured_llm.invoke([HumanMessage(content=content)])
-        return _parse_results(result.classifications)
+        response = llm.invoke([HumanMessage(content=content)])
+        text = response.content if hasattr(response, "content") else str(response)
+        raw = _extract_json_from_text(text)
+        if raw is not None:
+            return _parse_results(raw)
     except Exception as e:
-        # Groq sometimes returns correct JSON but fails tool validation
-        # Try to extract classifications from the error's failed_generation
-        import json, re
+        # Try to extract from error's failed_generation
         err_str = str(e)
-        # Try to find JSON array in the error message
-        match = re.search(r'\[[\s\S]*\]', err_str)
-        if match:
-            try:
-                raw = json.loads(match.group())
-                return _parse_results(raw)
-            except Exception:
-                pass
+        raw = _extract_json_from_text(err_str)
+        if raw is not None:
+            return _parse_results(raw)
         raise
+
+    # Fallback: all pages in this batch go to "other"
+    return [(start_idx + i, "other") for i in range(n)]
 
 
 def segregator_node(state: PipelineState, llm: BaseChatModel) -> dict:
@@ -90,7 +106,6 @@ def segregator_node(state: PipelineState, llm: BaseChatModel) -> dict:
     if n == 0:
         return {"page_classification_map": page_classification_map}
 
-    # Process in batches of MAX_IMAGES_PER_CALL
     for batch_start in range(0, n, MAX_IMAGES_PER_CALL):
         batch = pdf_pages[batch_start:batch_start + MAX_IMAGES_PER_CALL]
         try:
