@@ -32,8 +32,9 @@ def _classify_batch(llm: BaseChatModel, b64_images: list[str], start_idx: int) -
         f"I am sending you {n} page image(s) (pages {start_idx} to {start_idx + n - 1}). "
         f"Classify EACH page into exactly one of these document types: "
         + ", ".join(DOCUMENT_TYPES)
-        + f". Return a JSON with a 'classifications' array containing exactly {n} objects "
-        f"in order, each with a 'document_type' field."
+        + f". Return a JSON object with a 'classifications' key containing an array of exactly {n} objects "
+        f"in order, each with a 'document_type' field. "
+        f'Example: {{"classifications": [{{"document_type": "claim_form"}}]}}'
     )
 
     content = []
@@ -44,18 +45,39 @@ def _classify_batch(llm: BaseChatModel, b64_images: list[str], start_idx: int) -
         })
     content.append({"type": "text", "text": prompt})
 
-    structured_llm = llm.with_structured_output(AllPagesClassification)
-    result: AllPagesClassification = structured_llm.invoke([HumanMessage(content=content)])
-    classifications = result.classifications
+    def _parse_results(classifications: list) -> list[tuple[int, str]]:
+        while len(classifications) < n:
+            classifications.append({"document_type": "other"})
+        results = []
+        for i, cls in enumerate(classifications[:n]):
+            if isinstance(cls, dict):
+                doc_type = cls.get("document_type", "other")
+            else:
+                doc_type = getattr(cls, "document_type", "other")
+            if doc_type not in DOCUMENT_TYPES:
+                doc_type = "other"
+            results.append((start_idx + i, doc_type))
+        return results
 
-    # Pad with "other" if fewer results returned than pages sent
-    while len(classifications) < n:
-        classifications.append(PageClassification(document_type="other"))
-
-    return [
-        (start_idx + i, cls.document_type if cls.document_type in DOCUMENT_TYPES else "other")
-        for i, cls in enumerate(classifications[:n])
-    ]
+    # Try structured output first
+    try:
+        structured_llm = llm.with_structured_output(AllPagesClassification)
+        result: AllPagesClassification = structured_llm.invoke([HumanMessage(content=content)])
+        return _parse_results(result.classifications)
+    except Exception as e:
+        # Groq sometimes returns correct JSON but fails tool validation
+        # Try to extract classifications from the error's failed_generation
+        import json, re
+        err_str = str(e)
+        # Try to find JSON array in the error message
+        match = re.search(r'\[[\s\S]*\]', err_str)
+        if match:
+            try:
+                raw = json.loads(match.group())
+                return _parse_results(raw)
+            except Exception:
+                pass
+        raise
 
 
 def segregator_node(state: PipelineState, llm: BaseChatModel) -> dict:
