@@ -9,6 +9,11 @@ from src.pipeline import run_pipeline
 app = FastAPI()
 
 
+@app.get("/")
+def root():
+    return {"status": "ok"}
+
+
 @app.post("/api/process")
 async def process_claim(
     claim_id: str = Form(...),
